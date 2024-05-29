@@ -1,11 +1,12 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
+use std::iter::Skip;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
@@ -37,8 +38,15 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 
 impl MemTable {
     /// Create a new mem-table.
-    pub fn create(_id: usize) -> Self {
-        unimplemented!()
+    pub fn create(id: usize) -> Self {
+        let map: Arc<SkipMap<Bytes, Bytes>> = Arc::new(SkipMap::new());
+        let approximate_size = Arc::new(AtomicUsize::new(0));
+        MemTable {
+            map,
+            wal: None,
+            id,
+            approximate_size,
+        }
     }
 
     /// Create a new mem-table with WAL
@@ -69,7 +77,7 @@ impl MemTable {
 
     /// Get a value by key.
     pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+        self.map.get(_key).map(|entry| entry.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
@@ -77,7 +85,14 @@ impl MemTable {
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+        let key = Bytes::copy_from_slice(_key);
+        let value = Bytes::copy_from_slice(_value);
+        self.approximate_size.fetch_add(
+            key.len() + value.len() + std::mem::size_of::<Bytes>() * 2,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.map.insert(key, value);
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {
