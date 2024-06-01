@@ -1,7 +1,7 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::iter::Skip;
-use std::ops::Bound;
+use std::ops::{Bound, Deref};
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
-use crate::key::KeySlice;
+use crate::key::{Key, KeySlice};
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 
@@ -103,8 +103,19 @@ impl MemTable {
     }
 
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
+        let mut memtable_iterator = MemTableIteratorBuilder {
+            map: self.map.clone(),
+            iter_builder: |map: &Arc<SkipMap<Bytes, Bytes>>| {
+                map.range((map_bound(lower), map_bound(upper)))
+            },
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
+
+        memtable_iterator.next().unwrap();
+
+        memtable_iterator
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -150,18 +161,29 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.borrow_item().1.deref()
     }
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        Key::from_slice(self.borrow_item().0.deref())
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.with_item(|item| -> bool { !item.0.is_empty() })
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.with_mut(|fields| match fields.iter.next() {
+            Some(entry) => {
+                fields.item.0 = entry.key().clone();
+                fields.item.1 = entry.value().clone();
+            }
+            None => {
+                fields.item.0 = Bytes::new();
+                fields.item.1 = Bytes::new();
+            }
+        });
+
+        Ok(())
     }
 }
