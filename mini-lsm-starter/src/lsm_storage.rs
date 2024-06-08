@@ -281,7 +281,7 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        if let Some(result) = self.state.read().as_ref().memtable.as_ref().get(_key) {
+        if let Some(result) = self.state.read().memtable.get(_key) {
             if result.is_empty() {
                 return Ok(None);
             } else {
@@ -289,7 +289,7 @@ impl LsmStorageInner {
             }
         }
 
-        for immutable in self.state.read().as_ref().imm_memtables.iter() {
+        for immutable in self.state.read().imm_memtables.iter() {
             if let Some(result) = immutable.get(_key) {
                 if result.is_empty() {
                     return Ok(None);

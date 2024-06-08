@@ -62,11 +62,9 @@ impl<I: StorageIterator> MergeIterator<I> {
             }
         }
 
-        let current = binary_heap.pop();
-
         MergeIterator {
+            current: binary_heap.pop(),
             iters: binary_heap,
-            current,
         }
     }
 }

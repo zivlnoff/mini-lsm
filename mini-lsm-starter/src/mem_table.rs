@@ -76,17 +76,17 @@ impl MemTable {
     }
 
     /// Get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        self.map.get(_key).map(|entry| entry.value().clone())
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.map.get(key).map(|entry| entry.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
     ///
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let key = Bytes::copy_from_slice(_key);
-        let value = Bytes::copy_from_slice(_value);
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let key = Bytes::copy_from_slice(key);
+        let value = Bytes::copy_from_slice(value);
         self.approximate_size.fetch_add(
             key.len() + value.len() + std::mem::size_of::<Bytes>() * 2,
             std::sync::atomic::Ordering::Relaxed,
@@ -161,15 +161,15 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        self.borrow_item().1.deref()
+        self.borrow_item().1.as_ref()
     }
 
     fn key(&self) -> KeySlice {
-        Key::from_slice(self.borrow_item().0.deref())
+        Key::from_slice(self.borrow_item().0.as_ref())
     }
 
     fn is_valid(&self) -> bool {
-        self.with_item(|item| -> bool { !item.0.is_empty() })
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {

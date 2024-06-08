@@ -20,6 +20,7 @@ impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
         let mut lsm_iterator = Self { inner: iter };
 
+        // seems like a patch
         if lsm_iterator.is_valid() && lsm_iterator.value().is_empty() {
             lsm_iterator.next()?;
         }
