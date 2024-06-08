@@ -184,10 +184,6 @@ impl StorageIterator for MemTableIterator {
             }
         });
 
-        if !self.borrow_item().0.is_empty() && self.borrow_item().1.is_empty() {
-            return self.next();
-        }
-
         Ok(())
     }
 }

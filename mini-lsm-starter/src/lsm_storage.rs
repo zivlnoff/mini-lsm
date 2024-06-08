@@ -8,16 +8,18 @@ use std::sync::Arc;
 
 use anyhow::{Error, Ok, Result};
 use bytes::Bytes;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use crate::block::Block;
 use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::StorageIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::SsTable;
 
@@ -394,9 +396,16 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let guard = self.state.read();
+        let mut vec: Vec<Box<MemTableIterator>> = Vec::new();
+        vec.push(Box::new(guard.memtable.scan(lower, upper)));
+        for im in guard.imm_memtables.iter() {
+            vec.push(Box::new(im.scan(lower, upper)))
+        }
+        let lsm_iterator_inner = MergeIterator::create(vec);
+        Ok(FusedIterator::new(LsmIterator::new(lsm_iterator_inner)?))
     }
 }

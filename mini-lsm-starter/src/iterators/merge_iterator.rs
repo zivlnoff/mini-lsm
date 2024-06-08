@@ -1,18 +1,20 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use std::borrow::Borrow;
 use std::cmp::{self};
 use std::collections::binary_heap::PeekMut;
 use std::collections::{binary_heap, BinaryHeap};
-use std::iter;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::thread::current;
+use std::{iter, mem};
 
 use anyhow::{Ok, Result};
 use nom::character::complete::hex_digit0;
 
 use crate::key::KeySlice;
+use crate::mem_table::MemTableIterator;
 
 use super::StorageIterator;
 
@@ -61,6 +63,7 @@ impl<I: StorageIterator> MergeIterator<I> {
         }
 
         let current = binary_heap.pop();
+
         MergeIterator {
             iters: binary_heap,
             current,
@@ -89,12 +92,9 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
         // if other iter has the same key as current, invoke next()
         while let Some(mut iter) = self.iters.peek_mut() {
             if iter.1.key() == self.current.as_ref().unwrap().1.key() {
-                match iter.1.next() {
-                    Err(err) => {
-                        PeekMut::pop(iter);
-                        return Err(err);
-                    }
-                    _ => (),
+                if let Err(err) = iter.1.next() {
+                    PeekMut::pop(iter);
+                    return Err(err);
                 }
                 if !iter.1.is_valid() {
                     PeekMut::pop(iter);
