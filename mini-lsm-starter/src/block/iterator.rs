@@ -103,6 +103,16 @@ impl BlockIterator {
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
+        let max_key_len = ((&self.block.data
+            [self.block.offsets[self.block.offsets.len() - 1] as usize..])
+            .get_u16()) as usize;
+        let max_key = &self.block.data[self.block.offsets[self.block.offsets.len() - 1] as usize + 2
+            ..self.block.offsets[self.block.offsets.len() - 1] as usize + 2 + max_key_len];
+        if key.into_inner().gt(max_key) {
+            self.key = KeyVec::new();
+            return;
+        }
+
         // binary search
         let key_bytes = key.into_inner();
         let mut left = 0;
@@ -124,10 +134,12 @@ impl BlockIterator {
         let key_len = ((&self.block.data[self.block.offsets[left] as usize..]).get_u16()) as usize;
         let value_len = ((&self.block.data[self.block.offsets[left] as usize + 2 + key_len..])
             .get_u16()) as usize;
+
         self.key = KeyVec::from_vec(Vec::from(
             &self.block.data[self.block.offsets[left] as usize + 2
                 ..self.block.offsets[left] as usize + 2 + key_len],
         ));
+
         self.value_range = (
             self.block.offsets[left] as usize + 2 + key_len + 2,
             self.block.offsets[left] as usize + 2 + key_len + 2 + value_len,
