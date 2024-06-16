@@ -42,8 +42,7 @@ impl Block {
         let num_of_elements = (&data[data.len() - 2..]).get_u16() as usize;
 
         // get offset
-        let mut offsets = Vec::<u16>::new();
-        offsets.resize(num_of_elements, 0);
+        let mut offsets = vec![0; num_of_elements];
         for i in 0..num_of_elements {
             offsets[i] = (&data[data.len() - 2 - num_of_elements * 2 + i * 2..]).get_u16();
         }

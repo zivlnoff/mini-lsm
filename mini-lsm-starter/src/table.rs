@@ -57,7 +57,7 @@ impl BlockMeta {
     pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
         let mut block_meta = vec![];
         let mut vec: Vec<u8> = vec![];
-        buf.reader().read_to_end(&mut vec);
+        let _ = buf.reader().read_to_end(&mut vec);
         let mut arr_to_get = vec.as_slice();
         let mut index = 0;
         while arr_to_get.has_remaining() {
@@ -82,7 +82,7 @@ impl BlockMeta {
             })
         }
 
-        return block_meta;
+        block_meta
     }
 }
 
@@ -195,12 +195,11 @@ impl SsTable {
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
         let offset_begin = self.block_meta[block_idx].offset as u64;
-        let offset_end;
-        if block_idx == self.block_meta.len() - 1 {
-            offset_end = self.block_meta_offset as u64;
+        let offset_end = if block_idx == self.block_meta.len() - 1 {
+            self.block_meta_offset as u64
         } else {
-            offset_end = self.block_meta[block_idx + 1].offset as u64;
-        }
+            self.block_meta[block_idx + 1].offset as u64
+        };
         let buf = self.file.read(offset_begin, offset_end - offset_begin)?;
         let block = Arc::new(Block::decode(buf.as_slice()));
 
@@ -241,7 +240,6 @@ impl SsTable {
                 .into_inner()
                 .eq(first_key_left_block.as_key_slice().into_inner())
             {
-                left = left;
                 break;
             }
 

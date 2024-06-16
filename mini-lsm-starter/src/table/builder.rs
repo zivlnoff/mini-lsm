@@ -71,7 +71,7 @@ impl SsTableBuilder {
             let encoded_bytes = block.encode();
             self.data.put(encoded_bytes);
 
-            self.builder.add(key, value);
+            let _ = self.builder.add(key, value);
         }
 
         self.last_key = key.into_inner().to_vec();
@@ -134,8 +134,8 @@ impl SsTableBuilder {
             file: file_object,
             block_meta,
             block_meta_offset: meta_block_offset,
-            id: id,
-            block_cache: block_cache,
+            id,
+            block_cache,
             first_key: KeyBytes::from_bytes(Bytes::copy_from_slice(self.first_key.as_slice())),
             last_key: KeyBytes::from_bytes(Bytes::copy_from_slice(self.last_key.as_slice())),
             bloom: None,

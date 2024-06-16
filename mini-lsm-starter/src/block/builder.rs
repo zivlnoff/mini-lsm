@@ -35,7 +35,7 @@ impl BlockBuilder {
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         let encoded_block_size_before = self.offsets.len() * 2 + self.data.len() + 2;
         let encoded_block_size_after = encoded_block_size_before + key.len() + value.len() + 4 + 2;
-        if encoded_block_size_after.gt(&self.block_size) && self.offsets.len() != 0 {
+        if encoded_block_size_after.gt(&self.block_size) && !self.offsets.is_empty() {
             return false;
         }
 

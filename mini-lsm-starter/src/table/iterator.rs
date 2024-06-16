@@ -47,7 +47,6 @@ impl SsTableIterator {
                 .into_inner()
                 .eq(first_key_left_block.as_key_slice().into_inner())
             {
-                left = left;
                 break;
             }
 
@@ -99,7 +98,6 @@ impl SsTableIterator {
                 .into_inner()
                 .eq(first_key_left_block.as_key_slice().into_inner())
             {
-                left = left;
                 break;
             }
 
