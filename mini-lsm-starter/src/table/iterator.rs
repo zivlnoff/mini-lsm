@@ -63,6 +63,14 @@ impl SsTableIterator {
             let first_key_mid_block = &block_meta[mid].first_key;
             if key
                 .into_inner()
+                .eq(first_key_mid_block.as_key_slice().into_inner())
+            {
+                left = mid;
+                break;
+            }
+
+            if key
+                .into_inner()
                 .gt(first_key_mid_block.as_key_slice().into_inner())
             {
                 left = mid;
@@ -71,10 +79,14 @@ impl SsTableIterator {
             }
         }
 
+        if left == block_meta.len() {
+            left -= 1;
+        }
+
         let mut blk_iter = BlockIterator::create_and_seek_to_key(table.read_block(left)?, key);
-        if !blk_iter.is_valid() {
+        if !blk_iter.is_valid() && left < block_meta.len() - 1 {
             left += 1;
-            blk_iter = BlockIterator::create_and_seek_to_first(table.read_block(left + 1)?);
+            blk_iter = BlockIterator::create_and_seek_to_first(table.read_block(left)?);
         }
 
         Ok(SsTableIterator {

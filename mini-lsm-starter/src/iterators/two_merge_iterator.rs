@@ -10,7 +10,8 @@ use super::StorageIterator;
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
-    // Add fields as need
+    read_from: char, // Add fields as need
+                     // todo end_bound
 }
 
 impl<
@@ -19,7 +20,23 @@ impl<
     > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let read_from = if a.is_valid() && b.is_valid() {
+            if a.key() <= b.key() {
+                'a'
+            } else {
+                'b'
+            }
+        } else if a.is_valid() && !b.is_valid() {
+            'a'
+        } else if !a.is_valid() && b.is_valid() {
+            'b'
+        } else {
+            'n'
+        };
+
+        let two_merge_iterator = TwoMergeIterator { a, b, read_from };
+
+        Ok(two_merge_iterator)
     }
 }
 
@@ -31,18 +48,61 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if self.read_from.eq(&'a') {
+            self.a.key()
+        } else {
+            self.b.key()
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if self.read_from.eq(&'a') {
+            self.a.value()
+        } else {
+            self.b.value()
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.read_from.eq(&'n')
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.read_from.eq(&'a') {
+            if self.b.is_valid() && self.a.key().eq(&self.b.key()) {
+                self.b.next()?;
+            };
+            self.a.next()?;
+        } else if self.read_from.eq(&'b') {
+            if self.a.is_valid() && self.b.key().eq(&self.a.key()) {
+                self.a.next()?;
+            };
+            self.b.next()?;
+        } else {
+            return Ok(());
+        }
+
+        if !self.a.is_valid() && !self.b.is_valid() {
+            self.read_from = 'n';
+            return Ok(());
+        }
+
+        if !self.a.is_valid() {
+            self.read_from = 'b';
+            return Ok(());
+        }
+
+        if !self.b.is_valid() {
+            self.read_from = 'a';
+            return Ok(());
+        }
+
+        if self.a.key().le(&self.b.key()) {
+            self.read_from = 'a';
+        } else {
+            self.read_from = 'b';
+        }
+
+        Ok(())
     }
 }

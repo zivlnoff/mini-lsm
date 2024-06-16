@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Error, Ok, Result};
 use bytes::Bytes;
+use crossbeam_channel::bounded;
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use crate::block::Block;
@@ -15,13 +16,16 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
-use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::concat_iterator::SstConcatIterator;
+use crate::iterators::merge_iterator::{self, MergeIterator};
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::lsm_iterator::{FusedIterator, LsmIterator};
+use crate::key::{self, KeySlice};
+use crate::lsm_iterator::{self, FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::{MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -238,7 +242,7 @@ impl LsmStorageInner {
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
-        let path = path.as_ref();
+        let path: &Path = path.as_ref();
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -280,8 +284,9 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        if let Some(result) = self.state.read().memtable.get(_key) {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        // search in mem
+        if let Some(result) = self.state.read().memtable.get(key) {
             if result.is_empty() {
                 return Ok(None);
             } else {
@@ -290,11 +295,26 @@ impl LsmStorageInner {
         }
 
         for immutable in self.state.read().imm_memtables.iter() {
-            if let Some(result) = immutable.get(_key) {
+            if let Some(result) = immutable.get(key) {
                 if result.is_empty() {
                     return Ok(None);
                 } else {
                     return Ok(Some(result));
+                }
+            }
+        }
+
+        // search in sst
+        for sst in &self.state.read().l0_sstables {
+            let itr = SsTableIterator::create_and_seek_to_key(
+                self.state.read().sstables.get(sst).unwrap().clone(),
+                KeySlice::from_slice(key),
+            )?;
+            if itr.is_valid() && itr.key().into_inner().eq(key) {
+                if itr.value().is_empty() {
+                    return Ok(None);
+                } else {
+                    return Ok(Some(Bytes::copy_from_slice(itr.value())));
                 }
             }
         }
@@ -399,13 +419,63 @@ impl LsmStorageInner {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
+        // todo io improve
+
+        // get read lock
         let guard = self.state.read();
-        let mut vec: Vec<Box<MemTableIterator>> = Vec::new();
-        vec.push(Box::new(guard.memtable.scan(lower, upper)));
-        for im in guard.imm_memtables.iter() {
-            vec.push(Box::new(im.scan(lower, upper)))
-        }
-        let lsm_iterator_inner = MergeIterator::create(vec);
-        Ok(FusedIterator::new(LsmIterator::new(lsm_iterator_inner)?))
+
+        // merge_iterator for memtable
+        let merge_iterator_memtable = {
+            let mut vec: Vec<Box<MemTableIterator>> = vec![];
+            vec.push(Box::new(guard.memtable.scan(lower, upper)));
+            for im in guard.imm_memtables.iter() {
+                vec.push(Box::new(im.scan(lower, upper)))
+            }
+            MergeIterator::create(vec)
+        };
+
+        // merge_iterator for sstable
+        let merge_iterator_sstable = {
+            let mark;
+            let lower_slice: &[u8] = match lower {
+                Bound::Included(i) => {
+                    mark = 'i';
+                    i
+                }
+                Bound::Excluded(i) => {
+                    mark = 'e';
+                    i
+                }
+                Bound::Unbounded => {
+                    mark = 'u';
+                    &[]
+                }
+            };
+
+            let mut sst_vec: Vec<Box<SsTableIterator>> = Vec::new();
+            for sst in &guard.l0_sstables {
+                let mut itr = Box::new(SsTableIterator::create_and_seek_to_key(
+                    guard.sstables.get(sst).unwrap().clone(),
+                    KeySlice::from_slice(lower_slice),
+                )?);
+                if mark.eq(&'e') && itr.is_valid() && itr.key().into_inner().eq(lower_slice) {
+                    itr.next()?;
+                }
+                if itr.is_valid() {
+                    sst_vec.push(itr);
+                }
+            }
+
+            MergeIterator::create(sst_vec)
+        };
+
+        // constructing a TwoMergeIterator includes mem + sst
+        let lsm_iterator_inner =
+            TwoMergeIterator::create(merge_iterator_memtable, merge_iterator_sstable)?;
+
+        // wrapping
+        let fused_iterator = FusedIterator::new(LsmIterator::new(lsm_iterator_inner)?);
+
+        Ok(fused_iterator)
     }
 }
