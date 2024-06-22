@@ -67,13 +67,17 @@ impl BlockIterator {
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
+        // compute len
         let first_key_len = (&self.block.data[0..]).get_u16() as usize;
         let first_value_len = (&self.block.data[2 + first_key_len..]).get_u16() as usize;
+
+        // compute key&value
         self.key = KeyVec::from_vec(Vec::from(&self.block.data[2..2 + first_key_len]));
         self.value_range = (
             2 + first_key_len + 2,
             2 + first_key_len + 2 + first_value_len,
         );
+
         self.first_key = self.key.clone();
         self.idx = 0;
     }
@@ -86,9 +90,12 @@ impl BlockIterator {
             return;
         }
 
+        // compute len
         let next_key_len = (&self.block.data[self.value_range.1..]).get_u16() as usize;
         let next_value_len =
             (&self.block.data[self.value_range.1 + 2 + next_key_len..]).get_u16() as usize;
+
+        // compute key&value
         self.key = KeyVec::from_vec(Vec::from(
             &self.block.data[self.value_range.1 + 2..self.value_range.1 + 2 + next_key_len],
         ));
@@ -96,6 +103,7 @@ impl BlockIterator {
             self.value_range.1 + 2 + next_key_len + 2,
             self.value_range.1 + 2 + next_key_len + 2 + next_value_len,
         );
+
         self.idx += 1;
     }
 
@@ -103,6 +111,7 @@ impl BlockIterator {
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
+        // compare key(KeySlice) with the max key within block
         let max_key_len = ((&self.block.data
             [self.block.offsets[self.block.offsets.len() - 1] as usize..])
             .get_u16()) as usize;
@@ -139,11 +148,11 @@ impl BlockIterator {
             &self.block.data[self.block.offsets[left] as usize + 2
                 ..self.block.offsets[left] as usize + 2 + key_len],
         ));
-
         self.value_range = (
             self.block.offsets[left] as usize + 2 + key_len + 2,
             self.block.offsets[left] as usize + 2 + key_len + 2 + value_len,
         );
+
         self.idx = left;
     }
 }

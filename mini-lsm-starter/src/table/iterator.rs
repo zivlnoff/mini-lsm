@@ -42,45 +42,17 @@ impl SsTableIterator {
         let mut left = 0;
         let mut right = block_meta.len() - 1;
         while left < right {
-            let first_key_left_block = &block_meta[left].first_key;
-            if key
-                .into_inner()
-                .eq(first_key_left_block.as_key_slice().into_inner())
-            {
-                break;
-            }
-
-            let first_key_right_block = &block_meta[right].first_key;
-            if key
-                .into_inner()
-                .eq(first_key_right_block.as_key_slice().into_inner())
-            {
-                left = right;
-                break;
-            }
-
             let mid = (left + right + 1) / 2;
             let first_key_mid_block = &block_meta[mid].first_key;
-            if key
-                .into_inner()
-                .eq(first_key_mid_block.as_key_slice().into_inner())
-            {
-                left = mid;
-                break;
-            }
 
             if key
                 .into_inner()
-                .gt(first_key_mid_block.as_key_slice().into_inner())
+                .lt(first_key_mid_block.as_key_slice().into_inner())
             {
-                left = mid;
-            } else {
                 right = mid - 1;
+            } else {
+                left = mid;
             }
-        }
-
-        if left == block_meta.len() {
-            left -= 1;
         }
 
         let mut blk_iter = BlockIterator::create_and_seek_to_key(table.read_block(left)?, key);
@@ -91,8 +63,8 @@ impl SsTableIterator {
 
         Ok(SsTableIterator {
             table,
-            blk_iter,
             blk_idx: left,
+            blk_iter,
         })
     }
 
@@ -105,46 +77,17 @@ impl SsTableIterator {
         let mut left = 0;
         let mut right = block_meta.len() - 1;
         while left < right {
-            let first_key_left_block = &block_meta[left].first_key;
-            if key
-                .into_inner()
-                .eq(first_key_left_block.as_key_slice().into_inner())
-            {
-                break;
-            }
-
-            let first_key_right_block = &block_meta[right].first_key;
-            if key
-                .into_inner()
-                .eq(first_key_right_block.as_key_slice().into_inner())
-            {
-                left = right;
-                break;
-            }
-
             let mid = (left + right + 1) / 2;
-
             let first_key_mid_block = &block_meta[mid].first_key;
-            if key
-                .into_inner()
-                .eq(first_key_mid_block.as_key_slice().into_inner())
-            {
-                left = mid;
-                break;
-            }
 
             if key
                 .into_inner()
-                .gt(first_key_mid_block.as_key_slice().into_inner())
+                .lt(first_key_mid_block.as_key_slice().into_inner())
             {
-                left = mid;
-            } else {
                 right = mid - 1;
+            } else {
+                left = mid;
             }
-        }
-
-        if left == block_meta.len() {
-            left -= 1;
         }
 
         let mut blk_iter = BlockIterator::create_and_seek_to_key(table.read_block(left)?, key);

@@ -10,8 +10,7 @@ use super::StorageIterator;
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
-    read_from: char, // Add fields as need
-                     // todo end_bound
+    read_from: char,
 }
 
 impl<
@@ -104,5 +103,9 @@ impl<
         }
 
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.a.num_active_iterators() + self.b.num_active_iterators()
     }
 }

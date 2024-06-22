@@ -1,8 +1,10 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use std::ops::Bound;
+
 use anyhow::{Error, Result};
-use nom::{Err, Slice};
+use bytes::Bytes;
 
 use crate::{
     iterators::{
@@ -18,13 +20,17 @@ type LsmIteratorInner =
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    upper_bound: Bound<Bytes>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut lsm_iterator = Self { inner: iter };
+    pub(crate) fn new(iter: LsmIteratorInner, upper_bound: Bound<Bytes>) -> Result<Self> {
+        let mut lsm_iterator = Self {
+            inner: iter,
+            upper_bound,
+        };
 
-        // seems like a patch
+        // responsible for the syntax of 'delete' and then point to the 'first'
         if lsm_iterator.is_valid() && lsm_iterator.value().is_empty() {
             lsm_iterator.next()?;
         }
@@ -38,6 +44,11 @@ impl StorageIterator for LsmIterator {
 
     fn is_valid(&self) -> bool {
         self.inner.is_valid()
+            && match &self.upper_bound {
+                Bound::Included(i) => i.as_ref().ge(self.key()),
+                Bound::Excluded(e) => e.as_ref().gt(self.key()),
+                Bound::Unbounded => true,
+            }
     }
 
     fn key(&self) -> &[u8] {
@@ -56,6 +67,10 @@ impl StorageIterator for LsmIterator {
         }
 
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.inner.num_active_iterators()
     }
 }
 
@@ -111,5 +126,9 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
             }
             _ => Ok(()),
         }
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.iter.num_active_iterators()
     }
 }

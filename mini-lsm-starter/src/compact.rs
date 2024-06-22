@@ -145,6 +145,10 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
+        if !self.state.read().imm_memtables.is_empty() {
+            self.force_flush_next_imm_memtable()?;
+        }
+
         Ok(())
     }
 

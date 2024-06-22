@@ -1,31 +1,29 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
-use std::ops::{Bound, Deref, DerefMut};
+use std::ops::{Bound, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::{Error, Ok, Result};
+use anyhow::{Ok, Result};
 use bytes::Bytes;
-use crossbeam_channel::bounded;
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
 use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
-use crate::iterators::concat_iterator::SstConcatIterator;
-use crate::iterators::merge_iterator::{self, MergeIterator};
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::{self, KeySlice};
-use crate::lsm_iterator::{self, FusedIterator, LsmIterator};
+use crate::key::KeySlice;
+use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::{MemTable, MemTableIterator};
+use crate::mem_table::{self, map_bound, MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -160,7 +158,9 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.flush_notifier.send(())?;
+
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -405,7 +405,43 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        // state_lock is for double checking
+        let _state_lock = self.state_lock.lock();
+
+        // minimize critical section
+        let memtable_to_flush;
+        {
+            let guard = self.state.read();
+            memtable_to_flush = guard.imm_memtables.last().unwrap().clone();
+        };
+
+        // build a new sst
+        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+        memtable_to_flush.flush(&mut sst_builder)?;
+        let sst = sst_builder.build(
+            self.next_sst_id(),
+            Some(self.block_cache.clone()),
+            self.path.join(
+                self.next_sst_id
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .to_string()
+                    + ".sst",
+            ),
+        )?;
+
+        // change the state of lsm
+        {
+            let mut state = self.state.write();
+            Arc::make_mut(&mut state)
+                .l0_sstables
+                .insert(0, sst.sst_id());
+            Arc::make_mut(&mut state)
+                .sstables
+                .insert(sst.sst_id(), Arc::new(sst));
+            Arc::make_mut(&mut state).imm_memtables.pop();
+        }
+
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -414,53 +450,67 @@ impl LsmStorageInner {
     }
 
     /// Create an iterator over a range of keys.
+    // todo io improve
     pub fn scan(
         &self,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        // todo io improve
-
         // get read lock
         let guard = self.state.read();
 
         // merge_iterator for memtable
         let merge_iterator_memtable = {
             let mut vec: Vec<Box<MemTableIterator>> = vec![];
-            vec.push(Box::new(guard.memtable.scan(lower, upper)));
-            for im in guard.imm_memtables.iter() {
-                vec.push(Box::new(im.scan(lower, upper)))
+
+            let mut closure = |memtable: &MemTable, lower: Bound<&[u8]>, upper: Bound<&[u8]>| {
+                let memtable_iterator = memtable.scan(lower, upper);
+                if memtable_iterator.is_valid() {
+                    vec.push(Box::new(memtable_iterator));
+                }
+            };
+
+            closure(&guard.memtable, lower, upper);
+            for immutable_memtable in guard.imm_memtables.iter() {
+                closure(immutable_memtable, lower, upper);
             }
+
             MergeIterator::create(vec)
         };
 
         // merge_iterator for sstable
         let merge_iterator_sstable = {
-            let mark;
-            let lower_slice: &[u8] = match lower {
-                Bound::Included(i) => {
-                    mark = 'i';
-                    i
-                }
-                Bound::Excluded(i) => {
-                    mark = 'e';
-                    i
-                }
-                Bound::Unbounded => {
-                    mark = 'u';
-                    &[]
-                }
-            };
-
             let mut sst_vec: Vec<Box<SsTableIterator>> = Vec::new();
-            for sst in &guard.l0_sstables {
-                let mut itr = Box::new(SsTableIterator::create_and_seek_to_key(
-                    guard.sstables.get(sst).unwrap().clone(),
-                    KeySlice::from_slice(lower_slice),
-                )?);
-                if mark.eq(&'e') && itr.is_valid() && itr.key().into_inner().eq(lower_slice) {
-                    itr.next()?;
+            for sst_id in &guard.l0_sstables {
+                let sst = guard.sstables.get(sst_id).unwrap().clone();
+
+                // filter impossible sst
+                if !range_overlap(
+                    (lower, upper),
+                    (
+                        sst.first_key().as_key_slice().into_inner(),
+                        sst.last_key().as_key_slice().into_inner(),
+                    ),
+                ) {
+                    continue;
                 }
+
+                // find block in sst
+                let mut itr = Box::new(SsTableIterator::create_and_seek_to_key(
+                    sst,
+                    KeySlice::from_slice(match lower {
+                        Bound::Included(i) => i,
+                        Bound::Excluded(e) => e,
+                        Bound::Unbounded => &[],
+                    }),
+                )?);
+                // logic of start bound
+                if let Bound::Excluded(e) = lower {
+                    if itr.is_valid() && itr.key().into_inner().eq(e) {
+                        itr.next()?;
+                    };
+                }
+                // validity checking
                 if itr.is_valid() {
                     sst_vec.push(itr);
                 }
@@ -474,8 +524,43 @@ impl LsmStorageInner {
             TwoMergeIterator::create(merge_iterator_memtable, merge_iterator_sstable)?;
 
         // wrapping
-        let fused_iterator = FusedIterator::new(LsmIterator::new(lsm_iterator_inner)?);
+        let fused_iterator =
+            FusedIterator::new(LsmIterator::new(lsm_iterator_inner, map_bound(upper))?);
 
         Ok(fused_iterator)
     }
+}
+
+fn range_overlap(scan_range: (Bound<&[u8]>, Bound<&[u8]>), sst_range: (&[u8], &[u8])) -> bool {
+    // scan low bound checking
+    match scan_range.0 {
+        Bound::Included(i) => {
+            if i.gt(sst_range.1) {
+                return false;
+            };
+        }
+        Bound::Excluded(e) => {
+            if e.ge(sst_range.1) {
+                return false;
+            };
+        }
+        _ => (),
+    };
+
+    // scan upper bound checking
+    match scan_range.1 {
+        Bound::Included(i) => {
+            if i.lt(sst_range.0) {
+                return false;
+            };
+        }
+        Bound::Excluded(e) => {
+            if e.le(sst_range.0) {
+                return false;
+            };
+        }
+        _ => (),
+    };
+
+    true
 }
