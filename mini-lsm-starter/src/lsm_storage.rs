@@ -1,6 +1,7 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
+use std::iter;
 use std::ops::{Bound, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -15,6 +16,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::{self, SstConcatIterator};
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
@@ -304,7 +306,7 @@ impl LsmStorageInner {
             }
         }
 
-        // search in sst
+        // search in level-0
         for sst in &self.state.read().l0_sstables {
             let itr = SsTableIterator::create_and_seek_to_key(
                 self.state.read().sstables.get(sst).unwrap().clone(),
@@ -316,6 +318,21 @@ impl LsmStorageInner {
                 } else {
                     return Ok(Some(Bytes::copy_from_slice(itr.value())));
                 }
+            }
+        }
+
+        // search in level-1
+        let mut sstables = vec![];
+        for sst in &self.state.read().levels[0].1 {
+            sstables.push(self.state.read().sstables.get(sst).unwrap().clone());
+        }
+        let concat_iterator =
+            SstConcatIterator::create_and_seek_to_key(sstables, KeySlice::from_slice(key))?;
+        if concat_iterator.is_valid() && concat_iterator.key().into_inner().eq(key) {
+            if concat_iterator.value().is_empty() {
+                return Ok(None);
+            } else {
+                return Ok(Some(Bytes::copy_from_slice(concat_iterator.value())));
             }
         }
 
@@ -478,8 +495,8 @@ impl LsmStorageInner {
             MergeIterator::create(vec)
         };
 
-        // merge_iterator for sstable
-        let merge_iterator_sstable = {
+        // merge_iterator for sstables on l0
+        let merge_iterator_sstable_l0_level = {
             let mut sst_vec: Vec<Box<SsTableIterator>> = Vec::new();
             for sst_id in &guard.l0_sstables {
                 let sst = guard.sstables.get(sst_id).unwrap().clone();
@@ -519,9 +536,47 @@ impl LsmStorageInner {
             MergeIterator::create(sst_vec)
         };
 
+        let merge_iterator_sstable_lower_level = {
+            let mut itr_vec = Vec::new();
+            let mut sst_vec: Vec<Arc<SsTable>> = Vec::new();
+            for sst_id in &guard.levels[0].1 {
+                sst_vec.push(guard.sstables.get(sst_id).unwrap().clone());
+            }
+            let mut itr_l1 = SstConcatIterator::create_and_seek_to_key(
+                sst_vec,
+                KeySlice::from_slice(match lower {
+                    Bound::Included(i) => i,
+                    Bound::Excluded(e) => e,
+                    Bound::Unbounded => &[],
+                }),
+            )?;
+
+            // logic of start bound
+            if let Bound::Excluded(e) = lower {
+                if itr_l1.is_valid() && itr_l1.key().into_inner().eq(e) {
+                    itr_l1.next()?;
+                };
+            }
+            // validity checking
+            if itr_l1.is_valid() {
+                itr_vec.push(Box::new(itr_l1));
+            }
+
+            itr_vec
+        };
+
         // constructing a TwoMergeIterator includes mem + sst
-        let lsm_iterator_inner =
-            TwoMergeIterator::create(merge_iterator_memtable, merge_iterator_sstable)?;
+        let lsm_iterator_inner_mem_and_l0 =
+            TwoMergeIterator::create(merge_iterator_memtable, merge_iterator_sstable_l0_level)?;
+
+        // constructing a MergeIterator includes sst+
+        let lsm_iterator_inner_lower_level =
+            MergeIterator::create(merge_iterator_sstable_lower_level);
+
+        let lsm_iterator_inner = TwoMergeIterator::create(
+            lsm_iterator_inner_mem_and_l0,
+            lsm_iterator_inner_lower_level,
+        )?;
 
         // wrapping
         let fused_iterator =
