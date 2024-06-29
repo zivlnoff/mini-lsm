@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::lsm_storage::LsmStorageState;
+use crate::lsm_storage::{self, LsmStorageState};
 
 #[derive(Debug, Clone)]
 pub struct SimpleLeveledCompactionOptions {
@@ -33,9 +33,54 @@ impl SimpleLeveledCompactionController {
     /// Returns `None` if no compaction needs to be scheduled. The order of SSTs in the compaction task id vector matters.
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState,
+        snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        unimplemented!()
+        // level-0 trigger, the same as reference resolution, where i think has difference with doc
+        if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            let upper_level_sst_ids = snapshot.l0_sstables.clone();
+            let lower_level_sst_ids = snapshot.levels[0].1.clone();
+            if upper_level_sst_ids.len() != 0
+                && (lower_level_sst_ids.len() as f64 / upper_level_sst_ids.len() as f64)
+                    < self.options.size_ratio_percent as f64 / 100.0
+            {
+                let simple_leveled_compaction_task = SimpleLeveledCompactionTask {
+                    upper_level: None,
+                    upper_level_sst_ids,
+                    lower_level: 0,
+                    lower_level_sst_ids,
+                    is_lower_level_bottom_level: false,
+                };
+                return Some(simple_leveled_compaction_task);
+            };
+        };
+
+        // size ratio trigger
+        for lower_level in 1..snapshot.levels.len() {
+            let upper_level_size = snapshot.levels[lower_level - 1].1.len();
+            let lower_level_size = snapshot.levels[lower_level].1.len();
+            if upper_level_size != 0
+                && (lower_level_size as f64 / upper_level_size as f64)
+                    < self.options.size_ratio_percent as f64 / 100.0
+            {
+                let upper_level_sst_ids = snapshot.levels[lower_level - 1].1.clone();
+                let lower_level_sst_ids = snapshot.levels[lower_level].1.clone();
+
+                let simple_leveled_compaction_task = SimpleLeveledCompactionTask {
+                    upper_level: if lower_level == 0 {
+                        None
+                    } else {
+                        Some(lower_level - 1)
+                    },
+                    upper_level_sst_ids,
+                    lower_level: lower_level,
+                    lower_level_sst_ids,
+                    is_lower_level_bottom_level: false,
+                };
+                return Some(simple_leveled_compaction_task);
+            }
+        }
+
+        None
     }
 
     /// Apply the compaction result.
@@ -47,10 +92,62 @@ impl SimpleLeveledCompactionController {
     /// in your implementation.
     pub fn apply_compaction_result(
         &self,
-        _snapshot: &LsmStorageState,
-        _task: &SimpleLeveledCompactionTask,
-        _output: &[usize],
+        snapshot: &LsmStorageState,
+        task: &SimpleLeveledCompactionTask,
+        output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        match task.upper_level {
+            None => {
+                // l0 might has flushed sst
+                let mut l0_sstables = vec![];
+                for l0_sst in &snapshot.l0_sstables {
+                    if !task.upper_level_sst_ids.contains(l0_sst) {
+                        l0_sstables.push(*l0_sst);
+                    }
+                }
+
+                // only one thread running compaction job
+                let mut levels = snapshot.levels.clone();
+                levels[0].1 = output.to_vec();
+                let lsm_storage_state = LsmStorageState {
+                    memtable: snapshot.memtable.clone(),
+                    imm_memtables: snapshot.imm_memtables.clone(),
+                    l0_sstables,
+                    levels,
+                    sstables: snapshot.sstables.clone(),
+                };
+
+                let mut to_be_deleted = vec![];
+                for upper_level_sst_id in &task.upper_level_sst_ids {
+                    to_be_deleted.push(*upper_level_sst_id);
+                }
+                for lower_level_sst_id in &task.lower_level_sst_ids {
+                    to_be_deleted.push(*lower_level_sst_id);
+                }
+                (lsm_storage_state, to_be_deleted)
+            }
+            Some(upper_level) => {
+                // only one thread running compaction job
+                let mut levels = snapshot.levels.clone();
+                levels[upper_level].1 = vec![];
+                levels[upper_level + 1].1 = output.to_vec();
+                let lsm_storage_state = LsmStorageState {
+                    memtable: snapshot.memtable.clone(),
+                    imm_memtables: snapshot.imm_memtables.clone(),
+                    l0_sstables: snapshot.l0_sstables.clone(),
+                    levels,
+                    sstables: snapshot.sstables.clone(),
+                };
+
+                let mut to_be_deleted = vec![];
+                for upper_level_sst_id in &task.upper_level_sst_ids {
+                    to_be_deleted.push(*upper_level_sst_id);
+                }
+                for lower_level_sst_id in &task.lower_level_sst_ids {
+                    to_be_deleted.push(*lower_level_sst_id);
+                }
+                (lsm_storage_state, to_be_deleted)
+            }
+        }
     }
 }
