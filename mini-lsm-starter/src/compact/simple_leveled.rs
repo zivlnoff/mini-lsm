@@ -39,7 +39,7 @@ impl SimpleLeveledCompactionController {
         if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
             let upper_level_sst_ids = snapshot.l0_sstables.clone();
             let lower_level_sst_ids = snapshot.levels[0].1.clone();
-            if upper_level_sst_ids.len() != 0
+            if !upper_level_sst_ids.is_empty()
                 && (lower_level_sst_ids.len() as f64 / upper_level_sst_ids.len() as f64)
                     < self.options.size_ratio_percent as f64 / 100.0
             {
@@ -72,7 +72,7 @@ impl SimpleLeveledCompactionController {
                         Some(lower_level - 1)
                     },
                     upper_level_sst_ids,
-                    lower_level: lower_level,
+                    lower_level,
                     lower_level_sst_ids,
                     is_lower_level_bottom_level: false,
                 };
@@ -96,58 +96,27 @@ impl SimpleLeveledCompactionController {
         task: &SimpleLeveledCompactionTask,
         output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
+        let mut new_lsm_storage_state = snapshot.clone();
         match task.upper_level {
+            // only one thread running compaction job
             None => {
-                // l0 might has flushed sst
-                let mut l0_sstables = vec![];
-                for l0_sst in &snapshot.l0_sstables {
-                    if !task.upper_level_sst_ids.contains(l0_sst) {
-                        l0_sstables.push(*l0_sst);
-                    }
-                }
-
-                // only one thread running compaction job
-                let mut levels = snapshot.levels.clone();
-                levels[0].1 = output.to_vec();
-                let lsm_storage_state = LsmStorageState {
-                    memtable: snapshot.memtable.clone(),
-                    imm_memtables: snapshot.imm_memtables.clone(),
-                    l0_sstables,
-                    levels,
-                    sstables: snapshot.sstables.clone(),
-                };
-
-                let mut to_be_deleted = vec![];
-                for upper_level_sst_id in &task.upper_level_sst_ids {
-                    to_be_deleted.push(*upper_level_sst_id);
-                }
-                for lower_level_sst_id in &task.lower_level_sst_ids {
-                    to_be_deleted.push(*lower_level_sst_id);
-                }
-                (lsm_storage_state, to_be_deleted)
+                new_lsm_storage_state.l0_sstables = vec![];
+                new_lsm_storage_state.levels[0].1 = output.to_vec();
             }
             Some(upper_level) => {
-                // only one thread running compaction job
-                let mut levels = snapshot.levels.clone();
-                levels[upper_level].1 = vec![];
-                levels[upper_level + 1].1 = output.to_vec();
-                let lsm_storage_state = LsmStorageState {
-                    memtable: snapshot.memtable.clone(),
-                    imm_memtables: snapshot.imm_memtables.clone(),
-                    l0_sstables: snapshot.l0_sstables.clone(),
-                    levels,
-                    sstables: snapshot.sstables.clone(),
-                };
-
-                let mut to_be_deleted = vec![];
-                for upper_level_sst_id in &task.upper_level_sst_ids {
-                    to_be_deleted.push(*upper_level_sst_id);
-                }
-                for lower_level_sst_id in &task.lower_level_sst_ids {
-                    to_be_deleted.push(*lower_level_sst_id);
-                }
-                (lsm_storage_state, to_be_deleted)
+                new_lsm_storage_state.levels[upper_level].1 = vec![];
+                new_lsm_storage_state.levels[upper_level + 1].1 = output.to_vec();
             }
         }
+
+        let mut to_be_deleted = vec![];
+        for upper_level_sst_id in &task.upper_level_sst_ids {
+            to_be_deleted.push(*upper_level_sst_id);
+        }
+        for lower_level_sst_id in &task.lower_level_sst_ids {
+            to_be_deleted.push(*lower_level_sst_id);
+        }
+
+        (new_lsm_storage_state, to_be_deleted)
     }
 }

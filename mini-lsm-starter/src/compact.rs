@@ -4,14 +4,16 @@ mod leveled;
 mod simple_leveled;
 mod tiered;
 
-use std::collections::VecDeque;
-use std::ops::DerefMut;
+use std::collections::{HashMap, VecDeque};
+use std::ops::{Deref, DerefMut};
+use std::os::linux::raw::stat;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use nom::character::complete::tab;
+use nom::complete::take;
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, SimpleLeveledCompactionTask,
@@ -115,33 +117,43 @@ impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         let mut result = vec![];
 
-        // make a iterator on all compact sssts
-        let mut merge_iterator = if let CompactionTask::ForceFullCompaction {
-            l0_sstables,
-            l1_sstables,
-        } = task
-        {
-            let mut ssts_to_compact = vec![];
-            {
-                let state = self.state.read();
-                for l0_sst in l0_sstables {
-                    ssts_to_compact.push(state.sstables.get(l0_sst).unwrap().clone());
+        let snapshot = (*self.state.read()).clone();
+        let sst_ids = match task {
+            CompactionTask::Leveled(_) => todo!(),
+            CompactionTask::Tiered(_) => todo!(),
+            CompactionTask::Simple(task) => {
+                let mut ssd_ids = vec![];
+                for id in &task.upper_level_sst_ids {
+                    ssd_ids.push(*id);
                 }
-                for l1_sst in l1_sstables {
-                    ssts_to_compact.push(state.sstables.get(l1_sst).unwrap().clone());
+                for id in &task.lower_level_sst_ids {
+                    ssd_ids.push(*id);
                 }
+                ssd_ids
             }
-
-            let mut sst_iterators = vec![];
-            for sst in ssts_to_compact {
-                let sst_iterator = SsTableIterator::create_and_seek_to_first(sst)?;
-                sst_iterators.push(Box::new(sst_iterator));
+            CompactionTask::ForceFullCompaction {
+                l0_sstables,
+                l1_sstables,
+            } => {
+                let mut ssd_ids = vec![];
+                for id in l0_sstables {
+                    ssd_ids.push(*id);
+                }
+                for id in l1_sstables {
+                    ssd_ids.push(*id);
+                }
+                ssd_ids
             }
-
-            MergeIterator::create(sst_iterators)
-        } else {
-            panic!("task must be ForceFullCompaction until now");
         };
+
+        let mut sst_iterators = vec![];
+        for sst_id in sst_ids {
+            let sst_iterator = SsTableIterator::create_and_seek_to_first(
+                snapshot.sstables.get(&sst_id).unwrap().clone(),
+            )?;
+            sst_iterators.push(Box::new(sst_iterator));
+        }
+        let mut merge_iterator = MergeIterator::create(sst_iterators);
 
         let mut sst_table_builder = SsTableBuilder::new(self.options.block_size);
         while merge_iterator.is_valid() {
@@ -178,6 +190,7 @@ impl LsmStorageInner {
         Ok(result)
     }
 
+    // TODO reconstructure by the functionality
     pub fn force_full_compaction(&self) -> Result<()> {
         // pin all sst
         let mut l0_sstables = vec![];
@@ -207,8 +220,7 @@ impl LsmStorageInner {
             state_mutable
                 .l0_sstables
                 .retain(|l0_sst| !l0_sstables.contains(l0_sst));
-            // state.levels[0].1.retain(|l1_sst| !l1_sstables.contains(l1_sst));
-            state_mutable.levels[0].1.clear(); // full compaction always delete all l1 ssts and only current thread change l1 ssts
+            state_mutable.levels[0].1.clear();
             state_mutable
                 .sstables
                 .retain(|sst, _| !l0_sstables.contains(sst) && !l1_sstables.contains(sst));
@@ -223,7 +235,55 @@ impl LsmStorageInner {
     }
 
     fn trigger_compaction(&self) -> Result<()> {
-        unimplemented!()
+        // make a snapshot
+        let snapshot: Arc<LsmStorageState> = (*self.state.read()).clone();
+
+        // generate a compaction task
+        let compation_task = self
+            .compaction_controller
+            .generate_compaction_task(&snapshot);
+
+        // compact if need
+        if let Some(task) = compation_task {
+            // real compaction
+            let output_sstables = self.compact(&task)?;
+
+            // apply result
+            let mut output_sst_ids = vec![];
+            for output_sstable in output_sstables.iter() {
+                output_sst_ids.push(output_sstable.sst_id());
+            }
+            let (mut new_lsm_storage_state, to_be_deleted_sst_ids) = self
+                .compaction_controller
+                .apply_compaction_result(&snapshot, &task, &output_sst_ids);
+
+            // commit result, there might have gone throught flush within a small period of time
+            {
+                let mut write_guard = self.state.write();
+
+                // 'new' a lsm_storage_state
+                new_lsm_storage_state.memtable = write_guard.memtable.clone();
+                new_lsm_storage_state.imm_memtables = write_guard.imm_memtables.clone();
+
+                // dispose l0_sstables
+                let mut l0_sstables = write_guard.l0_sstables.clone();
+                l0_sstables.retain(|sst_id| !to_be_deleted_sst_ids.contains(sst_id));
+                new_lsm_storage_state.l0_sstables = l0_sstables;
+
+                // dispose sstables
+                let mut sstables = write_guard.sstables.clone();
+                sstables.retain(|k, _| !to_be_deleted_sst_ids.contains(k));
+                for output_sstable in output_sstables {
+                    sstables.insert(output_sstable.sst_id(), output_sstable);
+                }
+                new_lsm_storage_state.sstables = sstables;
+
+                // 'swap'
+                *write_guard = Arc::new(new_lsm_storage_state);
+            }
+        };
+
+        Ok(())
     }
 
     pub(crate) fn spawn_compaction_thread(
