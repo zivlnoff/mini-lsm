@@ -1,6 +1,7 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
+use std::fs::{self, create_dir};
 use std::iter;
 use std::ops::{Bound, DerefMut};
 use std::path::{Path, PathBuf};
@@ -245,6 +246,10 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path: &Path = path.as_ref();
+        if !path.is_dir() {
+            create_dir(path)?;
+        }
+
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -443,15 +448,11 @@ impl LsmStorageInner {
         // build a new sst
         let mut sst_builder = SsTableBuilder::new(self.options.block_size);
         memtable_to_flush.flush(&mut sst_builder)?;
+        let next_sst_id = self.next_sst_id();
         let sst = sst_builder.build(
-            self.next_sst_id(),
+            next_sst_id,
             Some(self.block_cache.clone()),
-            self.path.join(
-                self.next_sst_id
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    .to_string()
-                    + ".sst",
-            ),
+            self.path.join(next_sst_id.to_string() + ".sst"),
         )?;
 
         // change the state of lsm
