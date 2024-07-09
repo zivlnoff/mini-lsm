@@ -435,9 +435,6 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        // state_lock is for double checking
-        let _state_lock = self.state_lock.lock();
-
         // minimize critical section
         let memtable_to_flush;
         {
