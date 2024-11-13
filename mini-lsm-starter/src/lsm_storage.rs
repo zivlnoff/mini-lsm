@@ -436,21 +436,22 @@ impl LsmStorageInner {
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
         // minimize critical section
-        let memtable_to_flush;
-        {
+        let memtable_to_flush = {
             let guard = self.state.read();
-            memtable_to_flush = guard.imm_memtables.last().unwrap().clone();
+            guard.imm_memtables.last().unwrap().clone()
         };
 
         // build a new sst
-        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
-        memtable_to_flush.flush(&mut sst_builder)?;
-        let next_sst_id = self.next_sst_id();
-        let sst = sst_builder.build(
-            next_sst_id,
-            Some(self.block_cache.clone()),
-            self.path.join(next_sst_id.to_string() + ".sst"),
-        )?;
+        let sst = {
+            let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+            memtable_to_flush.flush(&mut sst_builder)?;
+            let next_sst_id = self.next_sst_id();
+            sst_builder.build(
+                next_sst_id,
+                Some(self.block_cache.clone()),
+                self.path.join(next_sst_id.to_string() + ".sst"),
+            )?
+        };
 
         // change the state of lsm
         {
